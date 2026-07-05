@@ -91,6 +91,59 @@ Not implemented yet:
 
 ## First End-to-End Loop
 
+If the provider exposes UDP to the gateway, use the UDP flow below. If external
+UDP is blocked, use the UDP-over-SSH bridge instead.
+
+## UDP over SSH
+
+Start the server-side bridge on the cluster. It listens on TCP localhost and
+forwards tunneled datagrams to the UDP gateway on `127.0.0.1:12000`:
+
+```bash
+PYTHONPATH=$PWD .venv/bin/python -m backend.media_gateway.udp_tcp_tunnel server \
+  --tcp-host 127.0.0.1 \
+  --tcp-port 13000 \
+  --udp-host 127.0.0.1 \
+  --udp-port 12000
+```
+
+Create the SSH tunnel on the operator machine. This is a TCP tunnel used only
+to carry UDP datagrams between the two Python bridge processes:
+
+```bash
+ssh -i /tmp/deepfake_voice_cluster_key -p 22010 \
+  -N -L 13000:127.0.0.1:13000 master@62.183.4.208
+```
+
+Run the local bridge on the operator machine. It exposes a local UDP gateway at
+`127.0.0.1:12000`:
+
+```bash
+PYTHONPATH=$PWD python -m backend.media_gateway.udp_tcp_tunnel client \
+  --udp-host 127.0.0.1 \
+  --udp-port 12000 \
+  --tcp-host 127.0.0.1 \
+  --tcp-port 13000
+```
+
+Then run the regular UDP preview and capture clients against the local bridge:
+
+```bash
+PYTHONPATH=$PWD python -m backend.media_gateway.preview_client \
+  --gateway-host 127.0.0.1 \
+  --gateway-port 12000 \
+  --audio-port 11001 \
+  --video-port 11002
+```
+
+```bash
+PYTHONPATH=$PWD python -m backend.media_gateway.capture_client \
+  --gateway-host 127.0.0.1 \
+  --gateway-port 12000
+```
+
+## UDP Mode
+
 Start the gateway on the cluster:
 
 ```bash
