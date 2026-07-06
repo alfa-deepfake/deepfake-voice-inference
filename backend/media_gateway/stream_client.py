@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import io
 import json
 import logging
 import queue
@@ -33,6 +34,17 @@ try:
     import sounddevice as sd  # type: ignore
 except ImportError:  # pragma: no cover - optional dependency
     sd = None
+
+try:
+    from PIL import Image, ImageTk  # type: ignore
+except ImportError:  # pragma: no cover - optional dependency
+    Image = None
+    ImageTk = None
+
+try:
+    import tkinter as tk
+except ImportError:  # pragma: no cover - optional dependency
+    tk = None
 
 
 @dataclass(frozen=True)
@@ -262,27 +274,52 @@ def audio_playback(audio_queue: queue.Queue, sample_rate: int, block_samples: in
 
 
 def video_preview(video_queue: queue.Queue) -> None:
-    if cv2 is None:
-        logger.warning("opencv-python not installed; video preview disabled")
+    if Image is None or ImageTk is None or tk is None:
+        logger.warning("Pillow and tkinter are required for video preview; video preview disabled")
         while True:
             video_queue.get()
 
+    preview = TkVideoPreview()
     while True:
         payload = payload_as_bytes(video_queue.get())
         if payload is None:
             logger.warning("dropping non-bytes video payload")
             continue
         try:
-            frame = cv2.imdecode(np.frombuffer(payload, dtype=np.uint8), cv2.IMREAD_COLOR)
-        except cv2.error as exc:
+            frame = Image.open(io.BytesIO(payload)).convert("RGB")
+        except Exception as exc:
             logger.warning("failed to decode video frame bytes=%s: %s", len(payload), exc)
             continue
-        if frame is None:
-            logger.warning("failed to decode video frame bytes=%s", len(payload))
-            continue
-        cv2.imshow("media-gateway-stream-preview", frame)
-        if cv2.waitKey(1) & 0xFF == 27:
+        if not preview.show(frame):
             break
+
+
+class TkVideoPreview:
+    def __init__(self) -> None:
+        assert tk is not None
+        self.root = tk.Tk()
+        self.root.title("media-gateway-stream-preview")
+        self.label = tk.Label(self.root)
+        self.label.pack()
+        self.closed = False
+        self.root.protocol("WM_DELETE_WINDOW", self.close)
+
+    def close(self) -> None:
+        self.closed = True
+        self.root.destroy()
+
+    def show(self, frame: "Image.Image") -> bool:
+        if self.closed:
+            return False
+        photo = ImageTk.PhotoImage(frame)
+        self.label.configure(image=photo)
+        self.label.image = photo
+        try:
+            self.root.update_idletasks()
+            self.root.update()
+        except tk.TclError:
+            return False
+        return not self.closed
 
 
 def payload_as_bytes(payload: object) -> Optional[bytes]:
