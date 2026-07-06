@@ -16,3 +16,9 @@ torch==2.4.0
 torchaudio==2.4.0
 torchcrepe==0.0.20
 torchfcpe
+cffi==2.0.0
+numpy==2.2.6
+opencv-python==5.0.0.93
+pillow==12.3.0
+pycparser==3.0
+sounddevice==0.5.5
