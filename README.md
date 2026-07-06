@@ -9,6 +9,149 @@
 > [docs/en/udp_inference.md](./docs/en/udp_inference.md) for the current
 > UDP prototype.
 
+## Realtime deepfake stream quick start
+
+This fork can run a realtime audio/video loop where the laptop captures the
+microphone and webcam, sends them through one SSH-tunneled TCP stream to the
+cluster, and shows the processed return stream in a local preview window.
+
+Use this flow when UDP from the laptop to the cluster is unreliable or blocked.
+The only public network path required is SSH to `62.183.4.208:22010`.
+
+### 1. Start the stream server on the cluster
+
+Connect to the cluster and start the backend from the server-side clone:
+
+```bash
+ssh -i /tmp/deepfake_voice_cluster_key -p 22010 master@62.183.4.208
+cd ~/work/deepfake-test/voice-module/deepfake-voice-inference
+source .venv/bin/activate
+
+PYTHONPATH=$PWD python -m backend.media_gateway.stream_server \
+  --host 127.0.0.1 \
+  --port 13000 \
+  --audio-model-path assets/weights/voice_model.pth \
+  --audio-index-path assets/indices/voice_model.index \
+  --audio-index-rate 0.3 \
+  --video-dlc-root ~/workspace_w9line/deep_face/extracted/Deep-Live-Cam \
+  --video-source-face ~/workspace_w9line/deep_face/extracted/Deep-Live-Cam/классный_чел_пнг.jpg \
+  --video-python-path ~/workspace_w9line/deep_face/extracted/Deep-Live-Cam/.venv_dlc/bin/python \
+  --video-cuda-lib-root "$PWD/.venv/lib/python3.10/site-packages" \
+  --video-execution-provider cuda \
+  --video-camera-fps 15.0
+```
+
+Expected server log:
+
+```text
+media_gateway.stream_server: stream server listening on tcp://127.0.0.1:13000
+```
+
+If you want to keep the server running after closing the SSH session, start it
+with `nohup` or inside `tmux`/`screen` and write logs to
+`/tmp/media_gateway_stream.log`.
+
+### 2. Open the SSH tunnel on the laptop
+
+In a separate laptop terminal:
+
+```bash
+ssh -i /tmp/deepfake_voice_cluster_key -p 22010 \
+  -N -L 13000:127.0.0.1:13000 master@62.183.4.208
+```
+
+Keep this terminal open while streaming. The laptop client will connect to
+`127.0.0.1:13000`, and SSH will forward that connection to the cluster.
+
+### 3. Run the laptop capture and preview client
+
+In another laptop terminal:
+
+```bash
+cd ~/work/deepfake-voice-inference
+source .venv/bin/activate
+
+PYTHONPATH=$PWD python -m backend.media_gateway.stream_client \
+  --gateway-host 127.0.0.1 \
+  --gateway-port 13000 \
+  --video-width 512 \
+  --video-height 288 \
+  --video-fps 15 \
+  --jpeg-quality 65
+```
+
+Expected laptop log:
+
+```text
+media_gateway.stream_client: connected to tcp://127.0.0.1:13000
+media_gateway.stream_client: microphone capture started
+media_gateway.stream_client: webcam capture started
+```
+
+Expected server log after the laptop connects:
+
+```text
+media_gateway.stream_server: stream client connected: ('127.0.0.1', ...)
+media_gateway.stream_server: control from ... {"kind": "stream_client_started", ...}
+```
+
+The local preview window is named `media-gateway-stream-preview`. Video preview
+uses Pillow/Tkinter so it keeps working even when the local OpenCV wheel cannot
+decode numpy buffers.
+
+### 4. Useful runtime checks
+
+Check whether the server is listening:
+
+```bash
+ssh -i /tmp/deepfake_voice_cluster_key -p 22010 master@62.183.4.208 \
+  "ss -ltnp | grep 13000 || true"
+```
+
+Watch the stream server log if it was started with log redirection:
+
+```bash
+ssh -i /tmp/deepfake_voice_cluster_key -p 22010 master@62.183.4.208 \
+  "tail -f /tmp/media_gateway_stream.log"
+```
+
+If the laptop connects but no preview window appears, verify that the laptop
+environment has GUI access and Tkinter:
+
+```bash
+python - <<'PY'
+import tkinter
+from PIL import Image, ImageTk
+print("tkinter and Pillow preview dependencies are available")
+PY
+```
+
+### 5. Tuning knobs
+
+Lower bandwidth and latency:
+
+```bash
+PYTHONPATH=$PWD python -m backend.media_gateway.stream_client \
+  --gateway-host 127.0.0.1 \
+  --gateway-port 13000 \
+  --video-width 512 \
+  --video-height 288 \
+  --video-fps 12 \
+  --jpeg-quality 55
+```
+
+Better visual quality if the tunnel is stable:
+
+```bash
+PYTHONPATH=$PWD python -m backend.media_gateway.stream_client \
+  --gateway-host 127.0.0.1 \
+  --gateway-port 13000 \
+  --video-width 640 \
+  --video-height 360 \
+  --video-fps 15 \
+  --jpeg-quality 75
+```
+
 [![madewithlove](https://img.shields.io/badge/made_with-%E2%9D%A4-red?style=for-the-badge&labelColor=orange
 )](https://github.com/RVC-Project/Retrieval-based-Voice-Conversion-WebUI)
 
