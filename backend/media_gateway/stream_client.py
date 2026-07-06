@@ -139,9 +139,9 @@ def response_loop(conn: StreamConnection, audio_queue: queue.Queue, video_queue:
     while True:
         packet = conn.receive()
         if packet.header.stream_type == StreamType.AUDIO and packet.header.codec == Codec.PCM16:
-            put_latest(audio_queue, packet.payload)
+            put_latest(audio_queue, bytes(packet.payload))
         elif packet.header.stream_type == StreamType.VIDEO:
-            put_latest(video_queue, packet.payload)
+            put_latest(video_queue, bytes(packet.payload))
 
 
 def audio_sender(audio_queue: queue.Queue, conn: StreamConnection) -> None:
@@ -240,7 +240,11 @@ def audio_playback(audio_queue: queue.Queue, sample_rate: int, block_samples: in
         if status:
             logger.warning("audio output status: %s", status)
         try:
-            payload = audio_queue.get_nowait()
+            payload = payload_as_bytes(audio_queue.get_nowait())
+            if payload is None:
+                logger.warning("dropping non-bytes audio payload")
+                outdata.fill(0)
+                return
             pcm = np.frombuffer(payload, dtype="<i2").astype(np.float32) / 32768.0
             outdata[:, 0] = pcm[: outdata.shape[0]]
         except queue.Empty:
@@ -264,13 +268,33 @@ def video_preview(video_queue: queue.Queue) -> None:
             video_queue.get()
 
     while True:
-        payload = video_queue.get()
-        frame = cv2.imdecode(np.frombuffer(payload, dtype=np.uint8), cv2.IMREAD_COLOR)
+        payload = payload_as_bytes(video_queue.get())
+        if payload is None:
+            logger.warning("dropping non-bytes video payload")
+            continue
+        try:
+            frame = cv2.imdecode(np.frombuffer(payload, dtype=np.uint8), cv2.IMREAD_COLOR)
+        except cv2.error as exc:
+            logger.warning("failed to decode video frame bytes=%s: %s", len(payload), exc)
+            continue
         if frame is None:
+            logger.warning("failed to decode video frame bytes=%s", len(payload))
             continue
         cv2.imshow("media-gateway-stream-preview", frame)
         if cv2.waitKey(1) & 0xFF == 27:
             break
+
+
+def payload_as_bytes(payload: object) -> Optional[bytes]:
+    if isinstance(payload, bytes):
+        return payload
+    if isinstance(payload, bytearray):
+        return bytes(payload)
+    if isinstance(payload, memoryview):
+        return payload.tobytes()
+    if isinstance(payload, np.ndarray):
+        return payload.tobytes()
+    return None
 
 
 def put_latest(item_queue: queue.Queue, item: bytes) -> None:
