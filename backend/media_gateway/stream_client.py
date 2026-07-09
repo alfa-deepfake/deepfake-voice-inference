@@ -16,7 +16,13 @@ from typing import Optional
 
 import numpy as np
 
-from backend.media_gateway.protocol import Codec, MediaPacket, PacketReassembler, StreamType, packetize_payload
+from backend.media_gateway.protocol import Codec, MediaPacket, PacketHeader, PacketReassembler, StreamType, packetize_payload
+from backend.media_gateway.stream_signature import (
+    DEFAULT_ISSUER,
+    DEFAULT_KEY_ID,
+    SignatureConfig,
+    StreamSigner,
+)
 
 
 LENGTH_STRUCT = struct.Struct("!I")
@@ -61,6 +67,7 @@ class StreamClientConfig:
     video_fps: float
     jpeg_quality: int
     source_wav: Optional[str]
+    signature: SignatureConfig
 
 
 def parse_args() -> StreamClientConfig:
@@ -77,6 +84,9 @@ def parse_args() -> StreamClientConfig:
     parser.add_argument("--video-fps", type=float, default=15.0)
     parser.add_argument("--jpeg-quality", type=int, default=65)
     parser.add_argument("--source-wav", default=None, help="Read audio from wav file instead of microphone")
+    parser.add_argument("--signature-key", default="", help="Enable test C2PA-like stream signatures with this shared secret")
+    parser.add_argument("--signature-key-id", default=DEFAULT_KEY_ID)
+    parser.add_argument("--signature-issuer", default=DEFAULT_ISSUER)
     args = parser.parse_args()
     session_id = (
         args.session_id.encode("utf-8")[:16].ljust(16, b"\x00")
@@ -96,6 +106,12 @@ def parse_args() -> StreamClientConfig:
         video_fps=args.video_fps,
         jpeg_quality=args.jpeg_quality,
         source_wav=args.source_wav,
+        signature=SignatureConfig(
+            enabled=bool(args.signature_key),
+            key_id=args.signature_key_id,
+            secret=args.signature_key.encode("utf-8"),
+            issuer=args.signature_issuer,
+        ),
     )
 
 
@@ -109,6 +125,7 @@ class StreamConnection:
         self.audio_sequence = 0
         self.video_sequence = 0
         self.control_sequence = 0
+        self.signer = StreamSigner(cfg.signature)
         logger.info("connected to tcp://%s:%s", cfg.gateway_host, cfg.gateway_port)
 
     def send_control(self, payload: dict) -> None:
@@ -133,13 +150,27 @@ class StreamConnection:
                 return packet
 
     def _send_payload(self, stream_type: StreamType, codec: Codec, payload: bytes, sequence_number: int) -> None:
+        timestamp_us = time.time_ns() // 1000
+        signed_packet = self.signer.sign_packet(
+            MediaPacket(
+                header=PacketHeader(
+                    stream_type=stream_type,
+                    codec=codec,
+                    session_id=self.cfg.session_id,
+                    sequence_number=sequence_number,
+                    timestamp_us=timestamp_us,
+                    payload_size=len(payload),
+                ),
+                payload=payload,
+            )
+        )
         packets = packetize_payload(
             stream_type=stream_type,
             codec=codec,
             session_id=self.cfg.session_id,
             sequence_number=sequence_number,
-            timestamp_us=time.time_ns() // 1000,
-            payload=payload,
+            timestamp_us=timestamp_us,
+            payload=signed_packet.payload,
         )
         with self.send_lock:
             for packet in packets:

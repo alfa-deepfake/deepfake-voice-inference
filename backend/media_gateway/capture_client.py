@@ -13,7 +13,13 @@ from typing import Optional
 
 import numpy as np
 
-from backend.media_gateway.protocol import Codec, StreamType, packetize_payload
+from backend.media_gateway.protocol import Codec, MediaPacket, PacketHeader, StreamType, packetize_payload
+from backend.media_gateway.stream_signature import (
+    DEFAULT_ISSUER,
+    DEFAULT_KEY_ID,
+    SignatureConfig,
+    StreamSigner,
+)
 
 
 logger = logging.getLogger("capture_client")
@@ -47,6 +53,7 @@ class CaptureConfig:
     video_fps: float
     jpeg_quality: int
     source_wav: Optional[str]
+    signature: SignatureConfig
 
 
 def parse_args() -> CaptureConfig:
@@ -65,6 +72,9 @@ def parse_args() -> CaptureConfig:
     parser.add_argument("--video-fps", type=float, default=20.0)
     parser.add_argument("--jpeg-quality", type=int, default=80)
     parser.add_argument("--source-wav", default=None, help="Read audio from wav file instead of microphone")
+    parser.add_argument("--signature-key", default="", help="Enable test C2PA-like stream signatures with this shared secret")
+    parser.add_argument("--signature-key-id", default=DEFAULT_KEY_ID)
+    parser.add_argument("--signature-issuer", default=DEFAULT_ISSUER)
     args = parser.parse_args()
     session_id = (
         args.session_id.encode("utf-8")[:16].ljust(16, b"\x00")
@@ -86,6 +96,12 @@ def parse_args() -> CaptureConfig:
         video_fps=args.video_fps,
         jpeg_quality=args.jpeg_quality,
         source_wav=args.source_wav,
+        signature=SignatureConfig(
+            enabled=bool(args.signature_key),
+            key_id=args.signature_key_id,
+            secret=args.signature_key.encode("utf-8"),
+            issuer=args.signature_issuer,
+        ),
     )
 
 
@@ -104,43 +120,45 @@ class UdpMediaSender:
         self.audio_sequence = 0
         self.video_sequence = 0
         self.control_sequence = 0
+        self.signer = StreamSigner(cfg.signature)
 
     def send_control(self, payload: dict) -> None:
         encoded = json.dumps(payload).encode("utf-8")
-        for packet in packetize_payload(
-            stream_type=StreamType.CONTROL,
-            codec=Codec.JSON,
-            session_id=self.cfg.session_id,
-            sequence_number=self.control_sequence,
-            timestamp_us=time.time_ns() // 1000,
-            payload=encoded,
-        ):
-            self.sock.sendto(packet.to_bytes(), (self.cfg.gateway_host, self.cfg.gateway_port))
+        self._send_payload(StreamType.CONTROL, Codec.JSON, encoded, self.control_sequence)
         self.control_sequence += 1
 
     def send_audio(self, payload: bytes) -> None:
-        for packet in packetize_payload(
-            stream_type=StreamType.AUDIO,
-            codec=Codec.PCM16,
-            session_id=self.cfg.session_id,
-            sequence_number=self.audio_sequence,
-            timestamp_us=time.time_ns() // 1000,
-            payload=payload,
-        ):
-            self.sock.sendto(packet.to_bytes(), (self.cfg.gateway_host, self.cfg.gateway_port))
+        self._send_payload(StreamType.AUDIO, Codec.PCM16, payload, self.audio_sequence)
         self.audio_sequence += 1
 
     def send_video(self, payload: bytes) -> None:
+        self._send_payload(StreamType.VIDEO, Codec.MJPEG, payload, self.video_sequence)
+        self.video_sequence += 1
+
+    def _send_payload(self, stream_type: StreamType, codec: Codec, payload: bytes, sequence_number: int) -> None:
+        timestamp_us = time.time_ns() // 1000
+        signed_packet = self.signer.sign_packet(
+            MediaPacket(
+                header=PacketHeader(
+                    stream_type=stream_type,
+                    codec=codec,
+                    session_id=self.cfg.session_id,
+                    sequence_number=sequence_number,
+                    timestamp_us=timestamp_us,
+                    payload_size=len(payload),
+                ),
+                payload=payload,
+            )
+        )
         for packet in packetize_payload(
-            stream_type=StreamType.VIDEO,
-            codec=Codec.MJPEG,
+            stream_type=stream_type,
+            codec=codec,
             session_id=self.cfg.session_id,
-            sequence_number=self.video_sequence,
-            timestamp_us=time.time_ns() // 1000,
-            payload=payload,
+            sequence_number=sequence_number,
+            timestamp_us=timestamp_us,
+            payload=signed_packet.payload,
         ):
             self.sock.sendto(packet.to_bytes(), (self.cfg.gateway_host, self.cfg.gateway_port))
-        self.video_sequence += 1
 
 
 def microphone_loop(cfg: CaptureConfig, sender: UdpMediaSender) -> None:
