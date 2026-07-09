@@ -100,7 +100,9 @@ video frames instead of accumulating latency.
 Start the stream server on the cluster:
 
 ```bash
-PYTHONPATH=$PWD .venv/bin/python -m backend.media_gateway.stream_server \
+PYTHONPATH=$PWD:/home/master/work/deepfake-stream-signature/src \
+  TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=1 \
+  .venv/bin/python -m backend.media_gateway.stream_server \
   --host 127.0.0.1 \
   --port 13000 \
   --audio-model-path assets/weights/voice_model.pth \
@@ -124,7 +126,8 @@ ssh -i /tmp/deepfake_voice_cluster_key -p 22010 \
 Run the combined stream client on the operator machine:
 
 ```bash
-PYTHONPATH=$PWD python -m backend.media_gateway.stream_client \
+PYTHONPATH=$PWD:/home/pinfoxxx/work/alfa/deepfake-stream-signature/src \
+  python -m backend.media_gateway.stream_client \
   --gateway-host 127.0.0.1 \
   --gateway-port 13000 \
   --video-width 512 \
@@ -132,6 +135,31 @@ PYTHONPATH=$PWD python -m backend.media_gateway.stream_client \
   --video-fps 15 \
   --jpeg-quality 65
 ```
+
+To simulate a C2PA-like signed deepfake stream, start the server with signature
+checking and pass the same test key to the client:
+
+```bash
+PYTHONPATH=$PWD:/home/master/work/deepfake-stream-signature/src \
+  TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=1 \
+  .venv/bin/python -m backend.media_gateway.stream_server \
+  ... \
+  --signature-policy log \
+  --signature-trusted-key deepfake-client-test=dev-secret
+```
+
+```bash
+PYTHONPATH=$PWD:/home/pinfoxxx/work/alfa/deepfake-stream-signature/src \
+  python -m backend.media_gateway.stream_client \
+  ... \
+  --signature-key dev-secret \
+  --signature-key-id deepfake-client-test
+```
+
+`--signature-policy off` preserves the old behavior. `log` verifies and strips
+signature envelopes before inference while warning on untrusted, tampered, or
+replayed signatures. `block` drops packets with invalid signature envelopes.
+Unsigned packets are still accepted so existing capture clients keep working.
 
 If the provider exposes UDP to the gateway, use the UDP flow below. If external
 UDP is blocked, use the UDP-over-SSH bridge instead.
