@@ -37,6 +37,12 @@ class AudioInferenceEngine:
         self.cfg = cfg
         self.config = _build_runtime_config(cfg)
         self.device = torch.device(self.config.device)
+        logger.info(
+            "audio inference device=%s cuda_available=%s is_half=%s",
+            self.device,
+            torch.cuda.is_available(),
+            self.config.is_half,
+        )
         self.rvc = RVC(
             cfg.pitch,
             cfg.model_path,
