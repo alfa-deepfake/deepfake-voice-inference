@@ -1,51 +1,38 @@
-# Media Gateway Plan
+# Media Gateway
 
-This module is the next backend layer above the existing voice and face
-engines. Its purpose is to accept live microphone and webcam streams over UDP,
-route audio into `deepfake-voice-inference`, route video into Deep-Live-Cam,
-and return processed streams to a preview client.
+The media gateway is the backend layer above the voice and face engines. It
+accepts live microphone and webcam streams over a single SSH-tunneled TCP
+connection, routes audio into the RVC engine, routes video into the
+Deep-Live-Cam adapter, and returns the processed streams to the client for
+local preview.
 
 ## Component Layout
 
 ```text
-capture_client
-  -> audio UDP packets
-  -> video UDP packets
+stream_client (laptop)
+  -> capture microphone + webcam
+  -> packetize + optionally sign
+  -> one length-prefixed TCP stream over the SSH tunnel
+  -> local audio playback + preview window
 
-media_gateway
+stream_server (cluster)
   -> audio inference engine (RVC)
-  -> video inference engine (Deep-Live-Cam adapter)
-  -> UDP packet reassembly / fragmentation
-  -> output packets
-
-preview_client
-  -> audio playback
-  -> video window
-  -> latency/fps overlay
+  -> video inference engine (Deep-Live-Cam adapter, subprocess)
+  -> packet reassembly / fragmentation
+  -> processed output packets back down the same connection
 ```
 
-## First Port Plan
+## Transport
 
-- `11000/udp`: gateway input
-- `11001/udp`: audio output
-- `11002/udp`: video output
+The wire protocol and length-prefixed framing live in the standalone sibling
+package `deepfake-media-transport` (`deepfake_media_transport`), so the format
+is shared with `deepfake-virtualcam-check` instead of being duplicated.
 
-The current implementation processes audio packets and returns them to
-`client_port + 1`. Video packets are processed through a separate
-Deep-Live-Cam worker process and returned to `client_port + 2`.
+Packet header (`deepfake_media_transport.protocol`):
 
-The preview client registers its own UDP return ports with the gateway by
-sending control packets from the exact sockets that will receive audio and
-video. This makes the return path work through NAT, as long as the gateway can
-reply to the same public UDP mappings created by the preview client.
-
-## Protocol
-
-`backend/media_gateway/protocol.py` defines a binary packet header:
-
-- 2 bytes magic
+- 2 bytes magic (`DF`)
 - 1 byte version
-- 1 byte stream type
+- 1 byte stream type (audio / video / control)
 - 16 bytes session id
 - 8 bytes sequence number
 - 8 bytes timestamp in microseconds
@@ -54,46 +41,17 @@ reply to the same public UDP mappings created by the preview client.
 - 2 bytes fragment index
 - 2 bytes fragment count
 
-This keeps the transport stateful enough for:
+This keeps the transport stateful enough for packet-loss detection,
+audio/video synchronization, multiple concurrent sessions, and large video
+frame fragmentation. On the wire each packet is carried as a length-prefixed
+TCP frame (`deepfake_media_transport.framing`).
 
-- packet loss detection
-- audio/video synchronization
-- multiple concurrent sessions
-- large video frame fragmentation over UDP
+## Signatures
 
-## Current Status
-
-Implemented:
-
-- packet header and codec enums
-- session bookkeeping
-- audio engine adapter using the existing realtime RVC processor
-- UDP gateway server
-- video engine adapter that delegates frame processing to a dedicated
-  Deep-Live-Cam Python environment
-- `capture_client.py` for webcam + microphone packetization
-- `preview_client.py` for audio/video preview
-- UDP fragmentation and reassembly for large MJPEG frames
-
-Not implemented yet:
-
-- jitter buffer logic
-- A/V synchronization policy
-- robust reconnect / session teardown
-
-## Recommended Next Steps
-
-1. Implement a minimal jitter buffer for audio and video.
-2. Add session metrics and overlay telemetry.
-3. Add reconnect logic and graceful shutdown.
-4. Add optional recording of input/output streams for debugging.
-5. Decide whether long-term transport should stay raw UDP or move to RTP/WebRTC.
-
-## First End-to-End Loop
-
-For the lowest setup friction and best behavior behind cluster firewalls, use
-stream mode. It runs one persistent binary stream through SSH and drops stale
-video frames instead of accumulating latency.
+Signing and verification are provided by the sibling package
+`deepfake-stream-signature`. `stream_signature.py` adapts its transport-agnostic
+`StreamPacket` API to the gateway's `MediaPacket`. See `--signature-policy`
+below.
 
 ## Stream Mode
 
@@ -133,8 +91,13 @@ PYTHONPATH=$PWD python -m backend.media_gateway.stream_client \
   --jpeg-quality 65
 ```
 
-To simulate a C2PA-like signed deepfake stream, start the server with signature
-checking and pass the same test key to the client:
+The `scripts/server.sh`, `scripts/tunnel.sh`, and `scripts/client.sh` wrappers
+read `scripts/config.env` and assemble these commands for you.
+
+## Signed Streams
+
+To simulate a C2PA-like signed stream, start the server with signature checking
+and pass the same test key to the client:
 
 ```bash
 TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=1 PYTHONPATH=$PWD .venv/bin/python -m backend.media_gateway.stream_server \
@@ -150,94 +113,15 @@ PYTHONPATH=$PWD python -m backend.media_gateway.stream_client \
   --signature-key-id deepfake-client-test
 ```
 
-`--signature-policy off` preserves the old behavior. `log` verifies and strips
-signature envelopes before inference while warning on untrusted, tampered, or
-replayed signatures. `block` drops packets with invalid signature envelopes.
-Unsigned packets are still accepted so existing capture clients keep working.
+- `--signature-policy off` disables verification.
+- `log` verifies and strips signature envelopes before inference while warning
+  on untrusted, tampered, or replayed signatures.
+- `block` drops packets with invalid signature envelopes.
 
-If the provider exposes UDP to the gateway, use the UDP flow below. If external
-UDP is blocked, use the UDP-over-SSH bridge instead.
+Unsigned packets are still accepted, so an unsigned client keeps working.
 
-## UDP over SSH
+## Not Implemented Yet
 
-Start the server-side bridge on the cluster. It listens on TCP localhost and
-forwards tunneled datagrams to the UDP gateway on `127.0.0.1:12000`:
-
-```bash
-PYTHONPATH=$PWD .venv/bin/python -m backend.media_gateway.udp_tcp_tunnel server \
-  --tcp-host 127.0.0.1 \
-  --tcp-port 13000 \
-  --udp-host 127.0.0.1 \
-  --udp-port 12000
-```
-
-Create the SSH tunnel on the operator machine. This is a TCP tunnel used only
-to carry UDP datagrams between the two Python bridge processes:
-
-```bash
-ssh -i /tmp/deepfake_voice_cluster_key -p 22010 \
-  -N -L 13000:127.0.0.1:13000 master@62.183.4.208
-```
-
-Run the local bridge on the operator machine. It exposes a local UDP gateway at
-`127.0.0.1:12000`:
-
-```bash
-PYTHONPATH=$PWD python -m backend.media_gateway.udp_tcp_tunnel client \
-  --udp-host 127.0.0.1 \
-  --udp-port 12000 \
-  --tcp-host 127.0.0.1 \
-  --tcp-port 13000
-```
-
-Then run the regular UDP preview and capture clients against the local bridge:
-
-```bash
-PYTHONPATH=$PWD python -m backend.media_gateway.preview_client \
-  --gateway-host 127.0.0.1 \
-  --gateway-port 12000 \
-  --audio-port 11001 \
-  --video-port 11002
-```
-
-```bash
-PYTHONPATH=$PWD python -m backend.media_gateway.capture_client \
-  --gateway-host 127.0.0.1 \
-  --gateway-port 12000
-```
-
-## UDP Mode
-
-Start the gateway on the cluster:
-
-```bash
-PYTHONPATH=$PWD .venv/bin/python -m backend.media_gateway.server \
-  --port 12000 \
-  --audio-model-path assets/weights/voice_model.pth \
-  --audio-index-path assets/indices/voice_model.index \
-  --audio-index-rate 0.3 \
-  --video-dlc-root ~/workspace_w9line/deep_face/extracted/Deep-Live-Cam \
-  --video-source-face ~/workspace_w9line/deep_face/extracted/Deep-Live-Cam/классный_чел_пнг.jpg \
-  --video-python-path ~/workspace_w9line/deep_face/extracted/Deep-Live-Cam/.venv_dlc/bin/python \
-  --video-cuda-lib-root ~/work/deepfake-voice-inference/.venv/lib/python3.10/site-packages \
-  --video-execution-provider cuda \
-  --video-camera-fps 20.0
-```
-
-Run capture on the operator machine:
-
-```bash
-python -m backend.media_gateway.capture_client \
-  --gateway-host CLUSTER_IP \
-  --gateway-port 12000
-```
-
-Run preview on the operator machine:
-
-```bash
-python -m backend.media_gateway.preview_client \
-  --gateway-host CLUSTER_IP \
-  --gateway-port 12000 \
-  --audio-port 11001 \
-  --video-port 11002
-```
+- jitter buffer logic
+- A/V synchronization policy
+- robust reconnect / session teardown

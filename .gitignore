@@ -26,3 +26,6 @@ rmvpe.pt
 /assets/weights/*
 ffmpeg.*
 ffprobe.*
+
+# Real launch config (holds cluster address + signature secret)
+scripts/config.env
