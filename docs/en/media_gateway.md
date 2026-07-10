@@ -67,7 +67,7 @@ TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=1 PYTHONPATH=$PWD .venv/bin/python -m backend.m
   --video-dlc-root ~/workspace_w9line/deep_face/extracted/Deep-Live-Cam \
   --video-source-face ~/workspace_w9line/deep_face/extracted/Deep-Live-Cam/классный_чел_пнг.jpg \
   --video-python-path ~/workspace_w9line/deep_face/extracted/Deep-Live-Cam/.venv_dlc/bin/python \
-  --video-cuda-lib-root ~/work/deepfake-voice-inference/.venv/lib/python3.10/site-packages \
+  --video-cuda-lib-root ~/work/deepfake-audio-video-inference/.venv/lib/python3.10/site-packages \
   --video-execution-provider cuda \
   --video-camera-fps 15.0
 ```

@@ -1,4 +1,4 @@
-# deepfake-voice-inference
+# deepfake-audio-video-inference
 
 Headless realtime media inference service for the current deepfake pipeline.
 
@@ -28,7 +28,7 @@ The active cluster clone is:
 The local laptop clone is usually:
 
 ```bash
-~/work/deepfake-voice-inference
+~/work/deepfake-audio-video-inference
 ```
 
 ## Required Runtime Assets

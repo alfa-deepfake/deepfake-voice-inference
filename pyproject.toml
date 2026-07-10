@@ -1,5 +1,5 @@
 [tool.poetry]
-name = "deepfake-voice-inference"
+name = "deepfake-audio-video-inference"
 version = "0.1.0"
 description = "Headless realtime audio/video deepfake inference over an SSH-tunneled stream"
 authors = ["alfa-deepfake"]
